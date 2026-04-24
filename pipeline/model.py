@@ -23,6 +23,8 @@ def _adversarial_validation(X_train: pd.DataFrame, X_test: pd.DataFrame) -> floa
     adv_skf = StratifiedKFold(n_splits=config.N_FOLDS, shuffle=True, random_state=config.SEED)
     adv_oof = np.zeros(len(X_adv), dtype=np.float32)
 
+    adv_importances = np.zeros(len(X_adv.columns))
+
     for tr_idx, val_idx in adv_skf.split(X_adv, y_adv):
         X_tr_adv, X_val_adv = X_adv.iloc[tr_idx], X_adv.iloc[val_idx]
         y_tr_adv = y_adv[tr_idx]
@@ -34,9 +36,16 @@ def _adversarial_validation(X_train: pd.DataFrame, X_test: pd.DataFrame) -> floa
         )
         adv_model.fit(X_tr_adv, y_tr_adv)
         adv_oof[val_idx] = adv_model.predict_proba(X_val_adv)[:, 1]
+        adv_importances += adv_model.feature_importances_ / config.N_FOLDS
 
     auc = roc_auc_score(y_adv, adv_oof)
     logger.info(f"Adversarial Validation AUC: {auc:.4f}")
+    
+    # Log top 15 high-drift features
+    imp_df = pd.DataFrame({'feature': X_adv.columns, 'importance': adv_importances})
+    imp_df = imp_df.sort_values(by='importance', ascending=False).head(15)
+    logger.info(f"Top 15 adversarial features (drift sources):\n{imp_df.to_string(index=False)}")
+
     if auc > config.ADV_AUC_THRESHOLD:
         logger.warning(
             f"HIGH DRIFT DETECTED — Adversarial AUC {auc:.4f} > {config.ADV_AUC_THRESHOLD}"
@@ -307,7 +316,11 @@ def evaluate_model(
     # Categorical columns NOT handled by TE — XGBoost needs these factorized
     remaining_cat_cols = [c for c in cat_cols if c not in te_cols]
 
-    oof_preds: np.ndarray = np.zeros(len(X))
+    # Store separate OOF predictions for stacking
+    oof_lgb = np.zeros(len(X))
+    oof_xgb = np.zeros(len(X))
+    oof_cb  = np.zeros(len(X))
+
     fold_aucs:  list[float] = []
     zero_imp_counts: dict[str, int] = {}
 
@@ -323,11 +336,9 @@ def evaluate_model(
         te_maps_fold = {
             c: _compute_te_map(X_tr[c], y_tr, alpha, global_mean) for c in te_cols
         }
-        # LGBM: TE-encoded + remaining categoricals left as-is (LGBM handles natively)
         X_tr_lgb  = _apply_te_maps(X_tr, te_cols, te_maps_fold, global_mean)
         X_val_lgb = _apply_te_maps(X_val, te_cols, te_maps_fold, global_mean)
 
-        # XGBoost: same TE encoding, then factorize remaining categoricals
         X_tr_xgb  = X_tr_lgb.copy()
         X_val_xgb = X_val_lgb.copy()
         for c in remaining_cat_cols:
@@ -335,7 +346,6 @@ def evaluate_model(
             X_tr_xgb[c] = codes
             X_val_xgb[c] = pd.Categorical(X_val_xgb[c], categories=uniques).codes
 
-        # ── CatBoost — original categoricals only, no _TE cols ───────────────
         X_tr_cb = X_val_cb = None
         if catboost_in_ensemble:
             X_tr_cb = X_tr.copy()
@@ -362,6 +372,7 @@ def evaluate_model(
                 X_tr_cb, y_tr,
                 eval_set=[(X_val_cb, y_val)],
                 early_stopping_rounds=config.EARLY_STOPPING_ROUNDS,
+                verbose=False
             )
 
         # ── XGBoost ──────────────────────────────────────────────────────────
@@ -372,28 +383,28 @@ def evaluate_model(
             verbose=False,
         )
 
-        # ── Weighted ensemble fold predictions ────────────────────────────────
+        # ── Store base predictions ────────────────────────────────
         p_lgb = lgb_m.predict_proba(X_val_lgb)[:, 1]
         p_xgb = xgb_m.predict_proba(X_val_xgb)[:, 1]
+        oof_lgb[val_idx] = p_lgb
+        oof_xgb[val_idx] = p_xgb
+        
         if catboost_in_ensemble:
             p_cb = cb_m.predict_proba(X_val_cb)[:, 1]
-            oof_preds[val_idx] = (
-                config.LGBM_WEIGHT * p_lgb
-                + config.CATBOOST_WEIGHT * p_cb
-                + config.XGB_WEIGHT * p_xgb
-            )
+            oof_cb[val_idx] = p_cb
+            # Temporary static weight for log
+            fold_oof = (config.LGBM_WEIGHT * p_lgb + config.CATBOOST_WEIGHT * p_cb + config.XGB_WEIGHT * p_xgb)
         else:
             wsum = config.LGBM_WEIGHT + config.XGB_WEIGHT
             wl = config.LGBM_WEIGHT / wsum
             wx = config.XGB_WEIGHT / wsum
-            oof_preds[val_idx] = wl * p_lgb + wx * p_xgb
+            fold_oof = wl * p_lgb + wx * p_xgb
 
-        fold_auc = roc_auc_score(y_val, oof_preds[val_idx])
+        fold_auc = roc_auc_score(y_val, fold_oof)
         fold_aucs.append(fold_auc)
-        logger.info(f"Fold {fold}/{config.N_FOLDS} AUC: {fold_auc:.5f}")
+        logger.info(f"Fold {fold}/{config.N_FOLDS} Static Weights AUC: {fold_auc:.5f}")
         flush_logger()
 
-        # Zero-importance tracking uses LGBM feature names (post-TE column set)
         for feat, imp in zip(lgb_m.feature_name_, lgb_m.feature_importances_):
             if imp == 0:
                 zero_imp_counts[feat] = zero_imp_counts.get(feat, 0) + 1
@@ -403,11 +414,31 @@ def evaluate_model(
             del X_tr_cb, X_val_cb, cb_m
         gc.collect()
 
-    final_auc = float(roc_auc_score(y, oof_preds))
-    logger.info(f"OOF Ensemble AUC (all folds): {final_auc:.5f}")
-    logger.info(f"Per-fold AUCs: {[round(a, 5) for a in fold_aucs]}")
+    # ── Level 2 Stacking ──────────────────────────────────────────
+    logger.info("Training Level 2 Stacker (RidgeRegression)...")
+    from sklearn.linear_model import Ridge
+    from sklearn.model_selection import cross_val_predict
 
-    # Zero-importance = 0 importance in ALL folds
+    if catboost_in_ensemble:
+        S_train = np.column_stack((oof_lgb, oof_cb, oof_xgb))
+    else:
+        S_train = np.column_stack((oof_lgb, oof_xgb))
+
+    meta_model = Ridge(alpha=1.0)
+    # Use cross_val_predict on the OOF predictions to get the final stacked OOF
+    stacked_oof = cross_val_predict(meta_model, S_train, y, cv=skf, method='predict')
+    
+    final_auc = float(roc_auc_score(y, stacked_oof))
+    static_auc = float(roc_auc_score(y, config.LGBM_WEIGHT * oof_lgb + config.CATBOOST_WEIGHT * oof_cb + config.XGB_WEIGHT * oof_xgb if catboost_in_ensemble else (oof_lgb + oof_xgb)/2))
+
+    logger.info(f"OOF Static Weights AUC: {static_auc:.5f}")
+    logger.info(f"OOF Stacked Ridge AUC: {final_auc:.5f}")
+    
+    # We will return the best of either static weights or stacked model
+    if static_auc > final_auc:
+        logger.info("Static weights outperformed Ridge Stacker. Using Static Weights.")
+        final_auc = static_auc
+
     zero_imp_feats = [f for f, cnt in zero_imp_counts.items() if cnt == config.N_FOLDS]
     logger.info(f"Zero-importance features ({len(zero_imp_feats)}): {zero_imp_feats}")
     flush_logger()

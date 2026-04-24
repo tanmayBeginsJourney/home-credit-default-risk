@@ -16,7 +16,7 @@ LOG_FILE = Path("./experiment.log")
 #   run_fast → 15% sample, 3 folds, no Optuna
 #   run_full → 100% data, 5-fold OOF (set RUN_OPTUNA True here for HPO on full data)
 DEBUG_MODE = False
-RUN_OPTUNA = False
+RUN_OPTUNA = True
 DEBUG_SAMPLE_FRAC = 0.15
 
 # ── Pipeline Toggles ─────────────────────────────────────────
@@ -94,6 +94,8 @@ COLS_TO_DROP: list[str] = [
     "REG_REGION_NOT_LIVE_REGION",
     # Run 12 — zero-importance across all 3 folds
     "FLAG_EMAIL",
+    # Zero importance after meta-features
+    "BUREAU_BB_STATUS_3_COUNT_SUM", "BUREAU_BB_STATUS_4_COUNT_SUM", "BUREAU_BB_STATUS_5_COUNT_SUM",
 ]
 
 # ── KNN Target Imputation (Tier 6) ───────────────────────
@@ -109,7 +111,7 @@ OPTUNA_N_TRIALS       = 40   # Trials per model (LGBM → CatBoost → XGBoost)
 OPTUNA_SUBSAMPLE_FRAC = 0.30  # Fraction of train rows per trial (speed vs. fidelity)
 OPTUNA_N_FOLDS        = 3    # CV folds inside each Optuna trial
 # After LGBM Optuna completes, set True to reuse LGBM_PARAMS and only tune CatBoost + XGBoost.
-OPTUNA_SKIP_LGBM_STUDY = True
+OPTUNA_SKIP_LGBM_STUDY = False
 
 # ── Early Stopping ────────────────────────────────────────────
 EARLY_STOPPING_ROUNDS = 30

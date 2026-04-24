@@ -68,6 +68,23 @@ def main(full: bool = False) -> float:
         gc.collect()
         logger.info(f"Merged {tag}: train={train.shape}, test={test.shape}")
 
+    # Meta-features
+    import polars as pl
+    if (config.CACHE_DIR / "meta_bureau.parquet").exists():
+        meta_bureau = pl.read_parquet(config.CACHE_DIR / "meta_bureau.parquet")
+        train = train.join(meta_bureau, on="SK_ID_CURR", how="left")
+        test  = test.join(meta_bureau,  on="SK_ID_CURR", how="left")
+        logger.info(f"Merged meta_bureau: train={train.shape}, test={test.shape}")
+        del meta_bureau
+        
+    if (config.CACHE_DIR / "meta_prev.parquet").exists():
+        meta_prev = pl.read_parquet(config.CACHE_DIR / "meta_prev.parquet")
+        train = train.join(meta_prev, on="SK_ID_CURR", how="left")
+        test  = test.join(meta_prev,  on="SK_ID_CURR", how="left")
+        logger.info(f"Merged meta_prev: train={train.shape}, test={test.shape}")
+        del meta_prev
+        gc.collect()
+
     # Feature engineering
     train = fe_application(train)
     test  = fe_application(test)
