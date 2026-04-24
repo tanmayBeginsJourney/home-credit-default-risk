@@ -14,14 +14,73 @@ def agg_bureau(bureau_path: Path, bureau_bal_path: Path) -> pl.DataFrame:
         logger.info(f"[CACHE HIT] {cache_path.name}")
         return pl.read_parquet(cache_path)
 
-    bb = pl.scan_parquet(bureau_bal_path)
+    bb = pl.scan_parquet(bureau_bal_path).with_columns(
+        pl.when(pl.col("STATUS") == "C").then(-1)
+        .when(pl.col("STATUS") == "X").then(0)
+        .otherwise(pl.col("STATUS").cast(pl.Int32, strict=False).fill_null(0))
+        .alias("STATUS_SEVERITY")
+    )
     bb_agg = bb.group_by("SK_ID_BUREAU").agg([
         pl.len().alias("BB_MONTHS_COUNT"),
+        pl.col("MONTHS_BALANCE").min().alias("BB_MONTHS_BALANCE_MIN"),
+        pl.col("MONTHS_BALANCE").max().alias("BB_MONTHS_BALANCE_MAX"),
         (pl.col("STATUS") == "C").mean().alias("BB_STATUS_C_FRAC"),
         (pl.col("STATUS").is_in(["1", "2", "3", "4", "5"])).sum().alias("BB_STATUS_LATE_COUNT"),
-    ])
+        (pl.col("STATUS").is_in(["1", "2", "3", "4", "5"])).mean().alias("BB_STATUS_LATE_FRAC"),
+        (pl.col("STATUS").is_in(["3", "4", "5"])).sum().alias("BB_STATUS_SEVERE_COUNT"),
+        (pl.col("STATUS").is_in(["3", "4", "5"])).mean().alias("BB_STATUS_SEVERE_FRAC"),
+        (pl.col("STATUS") == "0").sum().alias("BB_STATUS_0_COUNT"),
+        (pl.col("STATUS") == "1").sum().alias("BB_STATUS_1_COUNT"),
+        (pl.col("STATUS") == "2").sum().alias("BB_STATUS_2_COUNT"),
+        (pl.col("STATUS") == "3").sum().alias("BB_STATUS_3_COUNT"),
+        (pl.col("STATUS") == "4").sum().alias("BB_STATUS_4_COUNT"),
+        (pl.col("STATUS") == "5").sum().alias("BB_STATUS_5_COUNT"),
+        (pl.col("STATUS") == "0").mean().alias("BB_STATUS_0_FRAC"),
+        (pl.col("STATUS") == "1").mean().alias("BB_STATUS_1_FRAC"),
+        (pl.col("STATUS") == "2").mean().alias("BB_STATUS_2_FRAC"),
+        (pl.col("STATUS") == "3").mean().alias("BB_STATUS_3_FRAC"),
+        (pl.col("STATUS") == "4").mean().alias("BB_STATUS_4_FRAC"),
+        (pl.col("STATUS") == "5").mean().alias("BB_STATUS_5_FRAC"),
+        pl.col("STATUS_SEVERITY").sort_by("MONTHS_BALANCE").first().alias("BB_FIRST_STATUS_SEVERITY"),
+        pl.col("STATUS_SEVERITY").sort_by("MONTHS_BALANCE").last().alias("BB_LAST_STATUS_SEVERITY"),
+        pl.when(pl.col("STATUS") == "C")
+            .then(pl.col("MONTHS_BALANCE").abs())
+            .otherwise(None)
+            .min()
+            .alias("BB_WHEN_CLOSED_MONTH_ABS"),
+    ]).with_columns(
+        (
+            pl.col("BB_MONTHS_BALANCE_MAX").abs()
+            - pl.col("BB_WHEN_CLOSED_MONTH_ABS")
+        ).alias("BB_MONTH_CLOSED_TO_END")
+    )
 
-    bur = pl.scan_parquet(bureau_path).join(bb_agg, on="SK_ID_BUREAU", how="left")
+    bur = (
+        pl.scan_parquet(bureau_path)
+        .join(bb_agg, on="SK_ID_BUREAU", how="left")
+        .with_columns([
+            (pl.col("AMT_CREDIT_SUM") - pl.col("AMT_CREDIT_SUM_DEBT"))
+                .alias("BUREAU_CREDIT_MINUS_DEBT"),
+            (pl.col("AMT_CREDIT_SUM") - pl.col("AMT_CREDIT_SUM_LIMIT"))
+                .alias("BUREAU_CREDIT_MINUS_LIMIT"),
+            (pl.col("AMT_CREDIT_SUM") - pl.col("AMT_CREDIT_SUM_OVERDUE"))
+                .alias("BUREAU_CREDIT_MINUS_OVERDUE"),
+            (pl.col("AMT_CREDIT_SUM_DEBT") / (pl.col("AMT_CREDIT_SUM") + 1e-8))
+                .alias("BUREAU_DEBT_CREDIT_RATIO"),
+            (pl.col("AMT_CREDIT_SUM_OVERDUE") / (pl.col("AMT_CREDIT_SUM") + 1e-8))
+                .alias("BUREAU_OVERDUE_CREDIT_RATIO"),
+            (pl.col("DAYS_CREDIT") - pl.col("CREDIT_DAY_OVERDUE"))
+                .alias("BUREAU_DAYS_CREDIT_OVERDUE_GAP"),
+            (pl.col("DAYS_CREDIT") - pl.col("DAYS_CREDIT_ENDDATE"))
+                .alias("BUREAU_DAYS_CREDIT_ENDDATE_GAP"),
+            (pl.col("DAYS_CREDIT") - pl.col("DAYS_ENDDATE_FACT"))
+                .alias("BUREAU_DAYS_CREDIT_FACT_GAP"),
+            (pl.col("DAYS_CREDIT_ENDDATE") - pl.col("DAYS_ENDDATE_FACT"))
+                .alias("BUREAU_ENDDATE_FACT_GAP"),
+            (pl.col("DAYS_CREDIT_UPDATE") - pl.col("DAYS_CREDIT_ENDDATE"))
+                .alias("BUREAU_UPDATE_ENDDATE_GAP"),
+        ])
+    )
 
     active = bur.filter(pl.col("CREDIT_ACTIVE") == "Active")
     active_agg = active.group_by("SK_ID_CURR").agg([
@@ -42,6 +101,38 @@ def agg_bureau(bureau_path: Path, bureau_bal_path: Path) -> pl.DataFrame:
         (pl.col("CREDIT_ACTIVE") == "Active").sum().alias("BUREAU_ACTIVE_COUNT"),
         pl.col("BB_MONTHS_COUNT").mean().alias("BUREAU_BB_MONTHS_MEAN"),
         pl.col("BB_STATUS_LATE_COUNT").sum().alias("BUREAU_LATE_STATUS_SUM"),
+        pl.col("BB_STATUS_LATE_FRAC").mean().alias("BUREAU_BB_LATE_FRAC_MEAN"),
+        pl.col("BB_STATUS_SEVERE_COUNT").sum().alias("BUREAU_BB_SEVERE_STATUS_SUM"),
+        pl.col("BB_STATUS_SEVERE_FRAC").mean().alias("BUREAU_BB_SEVERE_FRAC_MEAN"),
+        pl.col("BB_FIRST_STATUS_SEVERITY").mean().alias("BUREAU_BB_FIRST_STATUS_SEV_MEAN"),
+        pl.col("BB_LAST_STATUS_SEVERITY").mean().alias("BUREAU_BB_LAST_STATUS_SEV_MEAN"),
+        pl.col("BB_LAST_STATUS_SEVERITY").max().alias("BUREAU_BB_LAST_STATUS_SEV_MAX"),
+        pl.col("BB_MONTH_CLOSED_TO_END").mean().alias("BUREAU_BB_MONTH_CLOSED_TO_END_MEAN"),
+        pl.col("BB_STATUS_0_COUNT").sum().alias("BUREAU_BB_STATUS_0_COUNT_SUM"),
+        pl.col("BB_STATUS_1_COUNT").sum().alias("BUREAU_BB_STATUS_1_COUNT_SUM"),
+        pl.col("BB_STATUS_2_COUNT").sum().alias("BUREAU_BB_STATUS_2_COUNT_SUM"),
+        pl.col("BB_STATUS_3_COUNT").sum().alias("BUREAU_BB_STATUS_3_COUNT_SUM"),
+        pl.col("BB_STATUS_4_COUNT").sum().alias("BUREAU_BB_STATUS_4_COUNT_SUM"),
+        pl.col("BB_STATUS_5_COUNT").sum().alias("BUREAU_BB_STATUS_5_COUNT_SUM"),
+        pl.col("BB_STATUS_0_FRAC").mean().alias("BUREAU_BB_STATUS_0_FRAC_MEAN"),
+        pl.col("BB_STATUS_1_FRAC").mean().alias("BUREAU_BB_STATUS_1_FRAC_MEAN"),
+        pl.col("BB_STATUS_2_FRAC").mean().alias("BUREAU_BB_STATUS_2_FRAC_MEAN"),
+        pl.col("BB_STATUS_3_FRAC").mean().alias("BUREAU_BB_STATUS_3_FRAC_MEAN"),
+        pl.col("BB_STATUS_4_FRAC").mean().alias("BUREAU_BB_STATUS_4_FRAC_MEAN"),
+        pl.col("BB_STATUS_5_FRAC").mean().alias("BUREAU_BB_STATUS_5_FRAC_MEAN"),
+        pl.col("BUREAU_CREDIT_MINUS_DEBT").mean().alias("BUREAU_CREDIT_MINUS_DEBT_MEAN"),
+        pl.col("BUREAU_CREDIT_MINUS_DEBT").sum().alias("BUREAU_CREDIT_MINUS_DEBT_SUM"),
+        pl.col("BUREAU_CREDIT_MINUS_LIMIT").mean().alias("BUREAU_CREDIT_MINUS_LIMIT_MEAN"),
+        pl.col("BUREAU_CREDIT_MINUS_LIMIT").sum().alias("BUREAU_CREDIT_MINUS_LIMIT_SUM"),
+        pl.col("BUREAU_CREDIT_MINUS_OVERDUE").mean().alias("BUREAU_CREDIT_MINUS_OVERDUE_MEAN"),
+        pl.col("BUREAU_DEBT_CREDIT_RATIO").mean().alias("BUREAU_DEBT_CREDIT_RATIO_MEAN"),
+        pl.col("BUREAU_DEBT_CREDIT_RATIO").max().alias("BUREAU_DEBT_CREDIT_RATIO_MAX"),
+        pl.col("BUREAU_OVERDUE_CREDIT_RATIO").mean().alias("BUREAU_OVERDUE_CREDIT_RATIO_MEAN"),
+        pl.col("BUREAU_DAYS_CREDIT_OVERDUE_GAP").mean().alias("BUREAU_DAYS_CREDIT_OVERDUE_GAP_MEAN"),
+        pl.col("BUREAU_DAYS_CREDIT_ENDDATE_GAP").mean().alias("BUREAU_DAYS_CREDIT_ENDDATE_GAP_MEAN"),
+        pl.col("BUREAU_DAYS_CREDIT_FACT_GAP").mean().alias("BUREAU_DAYS_CREDIT_FACT_GAP_MEAN"),
+        pl.col("BUREAU_ENDDATE_FACT_GAP").mean().alias("BUREAU_ENDDATE_FACT_GAP_MEAN"),
+        pl.col("BUREAU_UPDATE_ENDDATE_GAP").mean().alias("BUREAU_UPDATE_ENDDATE_GAP_MEAN"),
     ]).join(active_agg, on="SK_ID_CURR", how="left")
 
     out = result.collect()
@@ -86,6 +177,33 @@ def agg_installments(inst_path: Path) -> pl.DataFrame:
         )
     )
 
+    # Kept A2 baseline feature: recent installment windows.
+    inst_1yr = (
+        inst.filter(pl.col("DAYS_INSTALMENT") >= -365)
+        .group_by("SK_ID_CURR")
+        .agg([
+            pl.col("PAYMENT_RATIO").mean().alias("INST_1YR_PAYMENT_RATIO_MEAN"),
+            pl.col("PAYMENT_RATIO").min().alias("INST_1YR_PAYMENT_RATIO_MIN"),
+            pl.col("DAYS_LATE").mean().alias("INST_1YR_DAYS_LATE_MEAN"),
+            pl.col("DAYS_LATE").max().alias("INST_1YR_DAYS_LATE_MAX"),
+            pl.col("IS_LATE").mean().alias("INST_1YR_LATE_FRAC"),
+            pl.len().alias("INST_1YR_COUNT"),
+        ])
+    )
+
+    inst_2yr = (
+        inst.filter(pl.col("DAYS_INSTALMENT") >= -730)
+        .group_by("SK_ID_CURR")
+        .agg([
+            pl.col("PAYMENT_RATIO").mean().alias("INST_2YR_PAYMENT_RATIO_MEAN"),
+            pl.col("PAYMENT_RATIO").min().alias("INST_2YR_PAYMENT_RATIO_MIN"),
+            pl.col("DAYS_LATE").mean().alias("INST_2YR_DAYS_LATE_MEAN"),
+            pl.col("DAYS_LATE").max().alias("INST_2YR_DAYS_LATE_MAX"),
+            pl.col("IS_LATE").mean().alias("INST_2YR_LATE_FRAC"),
+            pl.len().alias("INST_2YR_COUNT"),
+        ])
+    )
+
     # Loan Restructuring Flag: unique instalment versions per SK_ID_PREV > 2 = renegotiated
     loan_restructure = (
         pl.scan_parquet(inst_path)
@@ -120,8 +238,17 @@ def agg_installments(inst_path: Path) -> pl.DataFrame:
         pl.col("EWMA_DAYS_LATE").mean().alias("INST_EWMA_LATE_MEAN"),
     ])
         .join(recent_deficit, on="SK_ID_CURR", how="left")
+        .join(inst_1yr, on="SK_ID_CURR", how="left")
+        .join(inst_2yr, on="SK_ID_CURR", how="left")
         .join(loan_restructure, on="SK_ID_CURR", how="left")
         .collect()
+    )
+
+    out = out.with_columns(
+        (
+            pl.col("INST_1YR_LATE_FRAC").fill_null(0)
+            - pl.col("INST_LATE_FRAC").fill_null(0)
+        ).alias("INST_1YR_LATE_FRAC_DELTA")
     )
 
     out = out.with_columns([

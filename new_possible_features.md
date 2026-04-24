@@ -1,113 +1,96 @@
-# Feature backlog — ranked for marginal OOF AUC
+# Kaggle-grounded feature backlog
 
-**Context:** Baseline is **~0.79048** (5-fold OOF, `USE_KNN=False`, surgical TE + trinity). Work **one group per experiment**, then `run_full` and compare. Invalidate `cache/*.parquet` when you change `aggregations.py`.
+**Current best 5-fold OOF ROC-AUC:** `0.79163`
 
-**Already implemented (do not re-add as “new”):**  
-`EXT_SRC_PROD`, `EXT_SRC_MEAN`, `EXT_SRC_MIN`, `LOAN_TERM_MONTHS` (= credit/annuity), `INCOME_PER_FAMILY_MEMBER`, `PHONE_CHANGE_STABILITY`, `CREDIT_INCOME_RATIO`, `ANNUITY_INCOME_RATIO`, `GOODS_INCOME_RATIO`, `GOODS_CREDIT_RATIO`, `DOWNPAYMENT_INCOME_STRAIN`, `CREDIT_SEEK_VELOCITY`, `ANNUAL_ANNUITY_INCOME_RATIO`, `EMPLOYMENT_DURATION_FRAC` (= employed/age), `NAN_COUNT`, bureau active split + decay, installments all-time aggs + EWMA/late/deficit/restructure, CC util (all + 12M p95), POS DPD EMA/acceleration, prev `PREV_REFUSED_FRAC` and related prev stats.
+This backlog replaces the older checklist. It is based on repo results plus accessible high-scoring or highly reused Home Credit public notebooks and mirrors:
 
----
+- Kaggle code listing sorted by score: https://www.kaggle.com/competitions/home-credit-default-risk/code?competitionId=9120&sortBy=scoreDescending&excludeNonAccessedDatasources=true
+- jsaguiar, LightGBM with Simple Features: https://www.kaggle.com/code/jsaguiar/lightgbm-with-simple-features
+- ogrellier, LightGBM with Selected Features: https://www.kaggle.com/code/ogrellier/lighgbm-with-selected-features
+- aantonova, 0.797 LGBM and Bayesian Optimization: https://www.kaggle.com/code/aantonova/797-lgbm-and-bayesian-optimization
+- Will Koehrsen manual FE: https://www.kaggle.com/code/willkoehrsen/introduction-to-manual-feature-engineering
+- Will Koehrsen manual FE part 2: https://www.kaggle.com/code/willkoehrsen/introduction-to-manual-feature-engineering-p2
+- ekrembayar step-by-step notebook: https://www.kaggle.com/code/ekrembayar/homecredit-default-risk-step-by-step-1st-notebook
+- oskird top-3% solution repo: https://github.com/oskird/Kaggle-Home-Credit-Default-Risk-Solution
 
-## Tier A — Highest expected lift (missing vs typical 0.805 solutions)
+Kaggle pages are JavaScript-rendered; source was inspected through notebook pages and `scriptcontent` downloads where available.
 
-### A1. EXT score shape (application, `fe_application`)
+## Current kept stack
 
-| Feature | Definition | Why |
-|--------|------------|-----|
-| `EXT_SRC_STD` | Std dev of `EXT_SOURCE_1..3` (row-wise) | Captures *disagreement* between bureaus; trees get product/mean but not dispersion. |
-| `EXT_SRC_MAX_MINUS_MIN` | `max(EXT*) - min(EXT*)` | Same idea, robust monotone signal. |
-| `EXT_SOURCE_i_DIV_EXT_j` | Pairwise ratios (3 pairs), `+ ε` | Nonlinear mixes of relative standing; orthogonal to product in many regions. |
-| `DAYS_EMPL_DIV_EXT3` | `DAYS_EMPLOYED / (EXT_SOURCE_3 + ε)` | Repeatedly cited in 1st-place writeups; links tenure to external score scale. |
-| `DAYS_BIRTH_DIV_EXT3` | `DAYS_BIRTH / (EXT_SOURCE_3 + ε)` | Age vs risk score; different curvature than linear terms. |
+Already present or treated as baseline, do not re-add as new:
 
-**Note:** Use the **same cleaned `DAYS_EMPLOYED`** as `data.py` (no 365243 in ratios).
+- Application: `EXT_SRC_PROD`, `EXT_SRC_MEAN`, `EXT_SRC_MIN`, `LOAN_TERM_MONTHS`, `INCOME_PER_FAMILY_MEMBER`, `PHONE_CHANGE_STABILITY`, `CREDIT_INCOME_RATIO`, `ANNUITY_INCOME_RATIO`, `GOODS_INCOME_RATIO`, `GOODS_CREDIT_RATIO`, `DOWNPAYMENT_INCOME_STRAIN`, `CREDIT_SEEK_VELOCITY`, `ANNUAL_ANNUITY_INCOME_RATIO`, `EMPLOYMENT_DURATION_FRAC`, `NAN_COUNT`.
+- Bureau/POS/CC/previous/installments: bureau active split and decay, all-time installments behavior, installment deficit/restructure, POS DPD EMA/acceleration, credit-card utilization, previous-app refusal stats.
+- Kept from the last FE loop: **A2 installments 1Y/2Y windows** and **C3 previous-app refused velocity**.
 
----
+## Do not re-run unchanged
 
-### A2. Installments — **1Y / 2Y windows** (`agg_installments`)
+These were already tested against the local stack and reverted for failing the `+0.00010` OOF threshold:
 
-**Why:** You already aggregate **all-time** behavior. Recent payment stress is a different signal; top solutions almost always add **recent-only** stats.
+- EXT score dispersion, max-min, pairwise ratios, and DAYS/EXT interactions.
+- Bureau closed branch statistics and active/total ratios in the older narrow form.
+- Broad previous-app approved/refused aggregations and refused/approved credit difference.
+- Credit-card payment-vs-min-regularity ratio and DPD flag rate.
+- `SOCIAL_DEF_PER_OBS`, `CREDIT_PER_PERSON`, `CREDIT_GOODS_PRICE_GAP`, `POPULATION_INCOME_RATIO`.
 
-Filter on `DAYS_INSTALMENT >= -365` and `>= -730` (separate blocks). Per window, per `SK_ID_CURR`, suggest:
+## Tier A - Bureau and bureau_balance lifecycle
 
-- Mean / min `PAYMENT_RATIO`, mean / max `DAYS_LATE`, mean `IS_LATE`, count rows  
-- **Derived:** `INST_1YR_LATE_FRAC - INST_LATE_FRAC` (recency vs history) — one column, high interpretability.
+**Why:** Top public pipelines repeatedly squeeze signal from bureau status history, DPD severity, closure timing, debt arithmetic, and date deltas. This is broader than the rejected old closed-branch-only test.
 
-Merge with prefixes `INST_1YR_*`, `INST_2YR_*` to avoid name clashes.
+Implement one coherent bureau lifecycle unit in `agg_bureau`; delete `cache/bureau_*.parquet` before `run_full`.
 
----
+- `BB_STATUS_0..5_COUNT`, `BB_STATUS_0..5_FRAC`, `BB_NONZERO_DPD_COUNT`, `BB_NONZERO_DPD_FRAC`, `BB_SEVERE_DPD_COUNT`, `BB_SEVERE_DPD_FRAC`.
+- `BB_FIRST_STATUS_*`, `BB_LAST_STATUS_*`, `BB_MONTHS_OBSERVED`, `BB_MONTHS_CLOSED_TO_END` style closure timing where feasible.
+- Bureau row helpers before client aggregation: credit minus debt, credit minus limit, credit minus overdue, credit enddate/fact/update gaps, days-credit minus overdue.
+- Client aggregations should stay compact: mean/max/sum for counts and fractions; mean/min/max/sum/var only for the strongest numeric debt/date helpers.
 
-### A3. Bureau — **Closed** branch + mix features (`agg_bureau`)
+## Tier B - Installment behavior depth
 
-**Why:** You have strong **Active** aggregates. **Closed** history (counts, sum/mean `AMT_CREDIT_SUM`, `DAYS_CREDIT` stats) captures *completed* credit lifecycle and mix.
+**Why:** Current kept features cover all-time behavior and 1Y/2Y windows, but top notebooks commonly include clipped DPD/DBD, payment-ratio variance, and entry-payment recency.
 
-- Parallel `group_by` for `CREDIT_ACTIVE == "Closed"`.
-- Ratios: `BUREAU_ACTIVE_COUNT / (bureau row count)`, `ACTIVE_CREDIT_SUM / (ACTIVE+CLOSED sum + ε)` — adjust to your naming conventions.
+Implement in `agg_installments`; delete `cache/installments_*.parquet`.
 
----
+- Row helpers: `INST_DPD_POS = max(DAYS_ENTRY_PAYMENT - DAYS_INSTALMENT, 0)`, `INST_DBD_POS = max(DAYS_INSTALMENT - DAYS_ENTRY_PAYMENT, 0)`.
+- Aggregate `DPD_POS` max/mean/sum, `DBD_POS` max/mean/sum, `PAYMENT_RATIO` max/sum/var, `PAYMENT_DIFF` max/var, `DAYS_ENTRY_PAYMENT` max/mean.
+- Optional compact loan-level then client-level block: aggregate by `SK_ID_PREV`, then client-level mean/max/sum over loan summaries. Keep it small to avoid feature explosion.
 
-## Tier B — Solid second wave
+## Tier C - Previous-application gaps
 
-### B1. Previous application — **Approved vs Refused** splits (`agg_previous_application`)
+**Why:** Strong public notebooks use previous-application amount gaps and date gaps more often than only raw amount means.
 
-**Why:** `PREV_REFUSED_FRAC` exists; many gains come from **conditional** stats (e.g. mean `AMT_CREDIT` / `AMT_ANNUITY` **among refused only** vs **approved only**, counts in last 730 `DAYS_DECISION`).
+Implement in `agg_previous_application`; delete `cache/prev_app_*.parquet`.
 
-- `PREV_APPROVAL_RATE` = approved count / total prev rows (explicit; may correlate with refused frac but trees still use both forms).
-- Optional: refused-only mean credit, approved-only mean credit, **difference** or ratio.
+- Row helpers: `PREV_APP_CREDIT_RATIO`, `PREV_APP_CREDIT_GAP`, `PREV_APP_GOODS_GAP`, `PREV_GOODS_CREDIT_GAP`, `PREV_FIRST_DRAWING_FIRST_DUE_GAP`, `PREV_TERMINATION_LT_500`, `PREV_MISSING_COUNT`.
+- Aggregate by client with mean/min/max/sum where sensible; do not re-add broad approved/refused split features unchanged.
 
----
+## Tier D - POS and credit-card breadth
 
-### B2. Credit card — **payment discipline** (`agg_credit_card`)
+**Why:** Public kernels frequently aggregate categorical status means and broad numeric monthly-balance summaries. The local stack currently has a very compact POS/CC subset.
 
-**Why:** You have utilization and DPD aggregates. Add row-level helpers then aggregate:
+Evaluate as separate units:
 
-- `AMT_PAYMENT_CURRENT / (AMT_INST_MIN_REGULARITY + ε)` → mean / max per `SK_ID_CURR`.
-- Mean of `(SK_DPD > 0)` (DPD flag rate) if not redundant with existing `CC_DPD_*`; if importances collapse, drop one.
+- POS (`agg_pos_cash`, delete `cache/pos_cash_*.parquet`): status means for common `NAME_CONTRACT_STATUS`, installment-progress ratio `CNT_INSTALMENT_FUTURE / CNT_INSTALMENT`, and flag `CNT_INSTALMENT > CNT_INSTALMENT_FUTURE`.
+- Credit card (`agg_credit_card`, delete `cache/credit_card_*.parquet`): receivable totals, drawing ATM/POS/current totals and counts, payment-total-current stats, mature-installment count stats. Do not re-run payment-vs-min-regularity unchanged.
 
----
+## Tier E - Preprocessing and low-cost application tests
 
-### B3. Application — **social circle** (`fe_application`)
+**Why:** Several high-scoring notebooks null obvious outliers before modeling. This may help more than another small ratio at this stage.
 
-| Feature | Definition | Why |
-|--------|------------|-----|
-| `SOCIAL_DEF_PER_OBS` | `(DEF_30 + DEF_60) / (OBS_30 + OBS_60 + 1)` | Compresses four columns into one stress ratio; low implementation cost. |
+Evaluate one small preprocessing unit at a time in `pipeline/data.py`; no aggregation cache delete unless aggregation code changes.
 
----
+- Null extreme `AMT_REQ_CREDIT_BUREAU_QRT > 10`, social-circle counts above `40`, and extreme `AMT_INCOME_TOTAL > 1e8`.
+- Consider `OWN_CAR_AGE` outlier nulling instead of p99 clipping in a separate test.
+- Application interactions only if materially different from rejected A1: pairwise EXT products and EXT-by-age/employment products, not ratios or dispersion.
 
-### B4. Application — **capacity per mouth** (`fe_application`)
+## Execution order
 
-| Feature | Definition | Why |
-|--------|------------|-----|
-| `CREDIT_PER_PERSON` | `AMT_CREDIT / (CNT_FAM_MEMBERS + 1)` | Not the same as income/family; captures household leverage. |
+1. Restore/verify kept A2 and C3 are code-defined, not cache-only.
+2. Tier A bureau lifecycle.
+3. Tier B installment behavior depth.
+4. Tier C previous-application gaps.
+5. Tier D POS, then Tier D credit-card.
+6. Tier E preprocessing tests.
 
----
+Run **one unit per experiment** with `.\mlpr\Scripts\python.exe -m entrypoints.run_full`.
 
-## Tier C — Worth a single experiment each
-
-- **`AMT_CREDIT - AMT_GOODS_PRICE`** (absolute gap, not only normalized strain) — may add a linear component trees fragment less efficiently.  
-- **Region × income bin** or **`REGION_POPULATION_RELATIVE` / `AMT_INCOME_TOTAL`** if present in schema — weak priors, can help tail cases.  
-- **Refused velocity (2Y):** count of refused prev apps with `DAYS_DECISION >= -730` / total prev in window — complements static refusal rate.
-
----
-
-## Deprioritized or skip
-
-| Item | Reason |
-|------|--------|
-| **KNN target feature** (`USE_KNN`, extra `KNN_COLS`) | Empirically **hurt** OOF vs off at ~0.79048; leave off unless you run a deliberate A/B. |
-| **`EXT_SRC_NANFLAG` (count of null EXT only)** | Largely subsumed by **`NAN_COUNT`** and per-column null patterns; low marginal value. |
-| **`CREDIT_ANNUITY_RATIO`** | Same as **`LOAN_TERM_MONTHS`**. |
-| **`EMPLOYED_PERC_AGE` / `INCOME_PER_PERSON`** | Same as **`EMPLOYMENT_DURATION_FRAC`** / **`INCOME_PER_FAMILY_MEMBER`**. |
-| **`DOCS_PROVIDED` / `DOCS_RATIO`** | **`DOCUMENT_COUNT`** was zero-importance and dropped; FLAG_DOCUMENT variants are mostly in **`COLS_TO_DROP`**. Unlikely to help. |
-| **Huge “cumulative AUC” tables from old Kaggle posts** | Your stack is already strong; treat those numbers as **illustrative**, not promises. |
-
----
-
-## Suggested order of attack
-
-1. **A1** (EXT shape + ÷EXT3 ratios) — no cache rebuild, fastest iteration.  
-2. **A2** (installment 1Y/2Y) — high historical lift in writeups; requires cache delete for installments.  
-3. **A3** (bureau closed + mix).  
-4. **B1** → **B2** → **B3** / **B4**.  
-5. **Tier C** as one-off tries if A/B still short of 0.80.
-
-**Keep rule:** adopt a change only if full OOF improves by **~≥ 0.0001** vs your current best; otherwise revert.
+**Keep rule:** keep only if `Final OOF AUC >= current_baseline + 0.00010`. If the gain is `+0.00010` to `+0.00025`, run a confirmation `run_full`; keep only if the average of the two full runs still clears the threshold.
