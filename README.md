@@ -11,7 +11,7 @@ Production-style, config-driven ML pipeline for Kaggle Home Credit Default Risk.
    - Preferred: `.parquet`
    - `.csv` also works: first run auto-converts to parquet.
 3. **Debug / fast (15% train sample, 3 folds):** `python -m entrypoints.run_fast` (or `from entrypoints.run_fast import main; main()`).
-4. **Full 5-fold OOF on 100% data** (same as production evaluation path, default `RUN_OPTUNA=False` in `config.py`): `python -m entrypoints.run_full` (or `main(full=True)`).
+4. **Full 5-fold OOF on 100% data** (same as production evaluation path, default `RUN_OPTUNA=False` in `config.py`): `python -m entrypoints.run_full` (or `from entrypoints.run_full import main; main()`).
 5. **Hyperparameter search:** set `RUN_OPTUNA = True` in `pipeline/config.py`, then use **`run_full` only** (never Optuna in debug).
 6. Check output in **`experiment.log`**. For context, read **`AGENT_HANDOFF.md`**.
 
@@ -24,7 +24,10 @@ Production-style, config-driven ML pipeline for Kaggle Home Credit Default Risk.
 - `pipeline/aggregations.py`: table-level and temporal aggregations (Polars).
 - `pipeline/features.py`: applicant-level + derived features.
 - `pipeline/model.py`: adversarial validation, CV training, ensembling, Optuna hooks.
+- `pipeline/utils.py`: logging, seeding, parquet conversion, runtime helpers.
 - `pipeline/config.py`: single source of truth for toggles, params, paths, seeds.
+- `entrypoints/run_fast.py`: debug-mode orchestrator.
+- `entrypoints/run_full.py`: full-mode orchestrator.
 - `experiment.log`: **only** log file; full run history and OOF (git-ignored with `*.log`).
 
 ## Config Modes (`pipeline/config.py`)
@@ -44,7 +47,7 @@ Production-style, config-driven ML pipeline for Kaggle Home Credit Default Risk.
 - Use logging only; no `print()` in pipeline code.
 - Prefer Polars for data/aggregation work; convert to pandas only for modeling.
 - Keep changes modular and small to reduce regression risk.
-- Preserve important project docs: `.cursorrules` and `spec.md`.
+- Preserve important project docs: `spec.md` and `AGENT_HANDOFF.md`.
 
 ## Data/Join Context
 Primary key: `SK_ID_CURR`.
