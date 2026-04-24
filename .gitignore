@@ -1,4 +1,28 @@
 data
-entrypoints
-notebooks
-pipeline
+cache
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Experiment/runtime artifacts
+*.log
+catboost_info/
+.ipynb_checkpoints/
+
+# Build/tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
+# Keep important project docs/rules tracked
+!.cursorrules
+!spec.md
+
+AGENT_HANDOFF.md
