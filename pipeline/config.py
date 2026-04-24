@@ -97,7 +97,7 @@ COLS_TO_DROP: list[str] = [
 ]
 
 # ── KNN Target Imputation (Tier 6) ───────────────────────
-USE_KNN         = True   # Re-enable for full run — fails in DEBUG (15% sample too sparse for k=500)
+USE_KNN         = False
 KNN_N_NEIGHBORS = 500
 KNN_COLS        = ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]
 
