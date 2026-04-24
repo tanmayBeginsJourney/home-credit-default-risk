@@ -239,7 +239,22 @@ def agg_previous_application(prev_path: Path) -> pl.DataFrame:
         (pl.col("NAME_CONTRACT_STATUS") == "Refused")
             .mean().alias("PREV_REFUSED_FRAC"),
         pl.col("RATE_DOWN_PAYMENT").mean().alias("PREV_RATE_DOWN_MEAN"),
-    ]).collect()
+    ])
+
+    # C3: Refused velocity (2Y)
+    recent_prev = prev.filter(pl.col("DAYS_DECISION") >= -730)
+    recent_agg = recent_prev.group_by("SK_ID_CURR").agg([
+        pl.len().alias("PREV_2YR_TOTAL_APPS"),
+        (pl.col("NAME_CONTRACT_STATUS") == "Refused").sum().alias("PREV_2YR_REFUSED_COUNT"),
+    ])
+    
+    out = out.join(recent_agg, on="SK_ID_CURR", how="left").collect()
+    
+    out = out.with_columns([
+        (pl.col("PREV_2YR_REFUSED_COUNT").fill_null(0) / 
+         (pl.col("PREV_2YR_TOTAL_APPS").fill_null(0) + 1e-8))
+            .alias("PREV_2YR_REFUSED_VELOCITY")
+    ])
     out = out.with_columns([
         pl.col(pl.Float64).cast(pl.Float32),
         pl.col(pl.Int64).cast(pl.Int32),
