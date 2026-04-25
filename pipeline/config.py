@@ -107,9 +107,9 @@ KNN_COLS        = ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]
 CAAFE_ITERS = 3
 
 # ── Optuna ────────────────────────────────────────────────────
-OPTUNA_N_TRIALS       = 40   # Trials per model (LGBM → CatBoost → XGBoost)
-OPTUNA_SUBSAMPLE_FRAC = 0.30  # Fraction of train rows per trial (speed vs. fidelity)
-OPTUNA_N_FOLDS        = 3    # CV folds inside each Optuna trial
+OPTUNA_N_TRIALS       = 60   # Trials per model (LGBM → CatBoost → XGBoost)
+OPTUNA_SUBSAMPLE_FRAC = 1.0  # Fraction of train rows per trial (100% for highest fidelity)
+OPTUNA_N_FOLDS        = 5    # CV folds inside each Optuna trial
 # After LGBM Optuna completes, set True to reuse LGBM_PARAMS and only tune CatBoost + XGBoost.
 OPTUNA_SKIP_LGBM_STUDY = False
 

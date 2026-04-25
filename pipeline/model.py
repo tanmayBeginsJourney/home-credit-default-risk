@@ -103,12 +103,17 @@ def run_optuna(
     from optuna.pruners import MedianPruner
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    X_opt, _, y_opt, _ = train_test_split(
-        X, y,
-        train_size=config.OPTUNA_SUBSAMPLE_FRAC,
-        stratify=y,
-        random_state=config.SEED,
-    )
+    # sklearn rejects train_size=1.0 as float (must be in (0, 1)); use full data without splitting.
+    frac = float(config.OPTUNA_SUBSAMPLE_FRAC)
+    if frac >= 1.0:
+        X_opt, y_opt = X, y
+    else:
+        X_opt, _, y_opt, _ = train_test_split(
+            X, y,
+            train_size=frac,
+            stratify=y,
+            random_state=config.SEED,
+        )
     skf = StratifiedKFold(n_splits=config.OPTUNA_N_FOLDS, shuffle=True, random_state=config.SEED)
 
     alpha                = config.TARGET_ENCODE_ALPHA
