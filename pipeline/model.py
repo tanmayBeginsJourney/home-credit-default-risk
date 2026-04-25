@@ -348,6 +348,13 @@ def evaluate_model(
 
     skf      = StratifiedKFold(n_splits=config.N_FOLDS, shuffle=True, random_state=config.SEED)
     cat_cols = X.select_dtypes(include=["category"]).columns.tolist()
+    use_dart = bool(getattr(config, "USE_LGBM_DART", True) and config.LGBM_DART_WEIGHT > 0.0)
+    lgbm_seeds = list(getattr(config, "LGBM_ENSEMBLE_SEEDS", [config.SEED]))
+    if len(lgbm_seeds) == 0:
+        lgbm_seeds = [config.SEED]
+    if not use_dart:
+        logger.info("LGBM DART disabled: skipping DART training/inference.")
+    logger.info(f"LGBM seed ensemble: seeds={lgbm_seeds}")
 
     # TE setup — LGBM + XGBoost receive _TE floats; CatBoost keeps original cats
     alpha       = config.TARGET_ENCODE_ALPHA
@@ -404,26 +411,35 @@ def evaluate_model(
                 X_val_cb[c] = X_val_cb[c].astype(object).fillna("MISSING")
 
         # ── LightGBM ─────────────────────────────────────────────────────────
-        lgb_m = lgb.LGBMClassifier(**lgbm_p)
-        lgb_m.fit(
-            X_tr_lgb, y_tr,
-            eval_set=[(X_val_lgb, y_val)],
-            callbacks=[
-                lgb.early_stopping(config.EARLY_STOPPING_ROUNDS, verbose=False),
-                lgb.log_evaluation(-1),
-            ],
-        )
+        lgb_models: list[lgb.LGBMClassifier] = []
+        p_lgb_acc = np.zeros(len(X_val_lgb), dtype=np.float32)
+        for s in lgbm_seeds:
+            lgb_seed_params = {**lgbm_p, "random_state": int(s)}
+            lgb_m = lgb.LGBMClassifier(**lgb_seed_params)
+            lgb_m.fit(
+                X_tr_lgb, y_tr,
+                eval_set=[(X_val_lgb, y_val)],
+                callbacks=[
+                    lgb.early_stopping(config.EARLY_STOPPING_ROUNDS, verbose=False),
+                    lgb.log_evaluation(-1),
+                ],
+            )
+            lgb_models.append(lgb_m)
+            p_lgb_acc += lgb_m.predict_proba(X_val_lgb)[:, 1].astype(np.float32)
 
-        # ── LightGBM DART ────────────────────────────────────────────────────
-        dart_m = lgb.LGBMClassifier(**dart_p)
-        dart_m.fit(
-            X_tr_lgb, y_tr,
-            eval_set=[(X_val_lgb, y_val)],
-            callbacks=[
-                # LightGBM DART mode does not support early stopping; avoid no-op callback.
-                lgb.log_evaluation(-1),
-            ],
-        )
+        p_dart = np.zeros(len(X_val_lgb), dtype=np.float32)
+        dart_m = None
+        if use_dart:
+            # ── LightGBM DART ────────────────────────────────────────────────
+            dart_m = lgb.LGBMClassifier(**dart_p)
+            dart_m.fit(
+                X_tr_lgb, y_tr,
+                eval_set=[(X_val_lgb, y_val)],
+                callbacks=[
+                    # LightGBM DART mode does not support early stopping; avoid no-op callback.
+                    lgb.log_evaluation(-1),
+                ],
+            )
 
         cb_m = None
         if catboost_in_ensemble:
@@ -444,8 +460,9 @@ def evaluate_model(
         )
 
         # ── Store base predictions ────────────────────────────────
-        p_lgb = lgb_m.predict_proba(X_val_lgb)[:, 1]
-        p_dart = dart_m.predict_proba(X_val_lgb)[:, 1]
+        p_lgb = p_lgb_acc / len(lgb_models)
+        if use_dart:
+            p_dart = dart_m.predict_proba(X_val_lgb)[:, 1]
         p_xgb = xgb_m.predict_proba(X_val_xgb)[:, 1]
         oof_lgb[val_idx] = p_lgb
         oof_dart[val_idx] = p_dart
@@ -473,11 +490,15 @@ def evaluate_model(
         logger.info(f"Fold {fold}/{config.N_FOLDS} Static Weights AUC: {fold_auc:.5f}")
         flush_logger()
 
-        for feat, imp in zip(lgb_m.feature_name_, lgb_m.feature_importances_):
+        primary_lgb = lgb_models[0]
+        for feat, imp in zip(primary_lgb.feature_name_, primary_lgb.feature_importances_):
             if imp == 0:
                 zero_imp_counts[feat] = zero_imp_counts.get(feat, 0) + 1
 
-        del (X_tr, X_val, X_tr_lgb, X_val_lgb, X_tr_xgb, X_val_xgb, lgb_m, dart_m, xgb_m)
+        del X_tr, X_val, X_tr_lgb, X_val_lgb, X_tr_xgb, X_val_xgb, p_lgb_acc, xgb_m, primary_lgb
+        del lgb_models
+        if dart_m is not None:
+            del dart_m
         if catboost_in_ensemble:
             del X_tr_cb, X_val_cb, cb_m
         gc.collect()
@@ -488,12 +509,18 @@ def evaluate_model(
     from sklearn.model_selection import cross_val_predict
 
     if catboost_in_ensemble:
-        S_train = np.column_stack((oof_lgb, oof_dart, oof_cb, oof_xgb))
+        if use_dart:
+            S_train = np.column_stack((oof_lgb, oof_dart, oof_cb, oof_xgb))
+        else:
+            S_train = np.column_stack((oof_lgb, oof_cb, oof_xgb))
         rank_lgb = _rank_normalize_preds(oof_lgb)
-        rank_dart = _rank_normalize_preds(oof_dart)
         rank_cb = _rank_normalize_preds(oof_cb)
         rank_xgb = _rank_normalize_preds(oof_xgb)
-        S_train_rank = np.column_stack((rank_lgb, rank_dart, rank_cb, rank_xgb))
+        rank_dart = _rank_normalize_preds(oof_dart)
+        if use_dart:
+            S_train_rank = np.column_stack((rank_lgb, rank_dart, rank_cb, rank_xgb))
+        else:
+            S_train_rank = np.column_stack((rank_lgb, rank_cb, rank_xgb))
     else:
         S_train = np.column_stack((oof_lgb, oof_dart, oof_xgb))
         rank_lgb = _rank_normalize_preds(oof_lgb)

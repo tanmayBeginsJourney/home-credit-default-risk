@@ -34,6 +34,8 @@ LGBM_WEIGHT      = 0.65
 LGBM_DART_WEIGHT = 0.00
 CATBOOST_WEIGHT  = 0.15
 XGB_WEIGHT       = 0.20
+USE_LGBM_DART    = False
+LGBM_ENSEMBLE_SEEDS = [42, 2024]
 
 # ... jumping to apply_mode_debug / full ...
 def apply_mode_debug() -> None:
