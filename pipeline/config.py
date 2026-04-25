@@ -30,9 +30,9 @@ N_FOLDS = 5
 SEED    = 42
 
 # ── Ensemble Weights (must sum to 1.0) ───────────────────────
-LGBM_WEIGHT      = 0.30
-LGBM_DART_WEIGHT = 0.20
-CATBOOST_WEIGHT  = 0.30
+LGBM_WEIGHT      = 0.65
+LGBM_DART_WEIGHT = 0.00
+CATBOOST_WEIGHT  = 0.15
 XGB_WEIGHT       = 0.20
 
 # ... jumping to apply_mode_debug / full ...
@@ -148,12 +148,16 @@ COLS_TO_DROP: list[str] = [
     "FLAG_EMAIL",
     # Zero importance after meta-features
     "BUREAU_BB_STATUS_3_COUNT_SUM", "BUREAU_BB_STATUS_4_COUNT_SUM", "BUREAU_BB_STATUS_5_COUNT_SUM",
+    # Zero importance in accepted run_id=bcf3118873d54371acb775a8d0d5e188
+    "BUREAU_PROLONG_SUM", "BUREAU_BB_SEVERE_STATUS_SUM",
 ]
 
 # ── KNN Target Imputation (Tier 6) ───────────────────────
-USE_KNN         = False
+USE_KNN         = True
 KNN_N_NEIGHBORS = 500
+KNN_NEIGHBORS_LIST = [100, 300, 500]
 KNN_COLS        = ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]
+KNN_USE_CREDIT_ANNUITY_RATIO = True
 
 # ── CAAFE ─────────────────────────────────────────────────────
 CAAFE_ITERS = 3

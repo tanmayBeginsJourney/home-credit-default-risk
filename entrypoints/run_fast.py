@@ -157,20 +157,39 @@ def main(full: bool = False) -> float:
         from sklearn.neighbors import KDTree
         avail = [c for c in config.KNN_COLS if c in X_train.columns]
         if avail:
-            med = X_train[avail].median()
-            tr_knn = X_train[avail].fillna(med).values.astype("float32")
-            te_knn = X_test[avail].fillna(med).values.astype("float32")
+            knn_train_df = X_train[avail].copy()
+            knn_test_df = X_test[avail].copy()
+            if getattr(config, "KNN_USE_CREDIT_ANNUITY_RATIO", False):
+                ratio_col = "KNN_CREDIT_ANNUITY_RATIO"
+                knn_train_df[ratio_col] = (
+                    X_train["AMT_CREDIT"] / (X_train["AMT_ANNUITY"] + 1e-8)
+                )
+                knn_test_df[ratio_col] = (
+                    X_test["AMT_CREDIT"] / (X_test["AMT_ANNUITY"] + 1e-8)
+                )
+            med = knn_train_df.median()
+            tr_knn = knn_train_df.fillna(med).values.astype("float32")
+            te_knn = knn_test_df.fillna(med).values.astype("float32")
             tree = KDTree(tr_knn)
-            k = min(config.KNN_N_NEIGHBORS, len(X_train) - 1)
-            # Leave-one-out: query k+1, skip index 0 (self)
-            _, tr_idx = tree.query(tr_knn, k=k + 1)
+            ks = list(getattr(config, "KNN_NEIGHBORS_LIST", [])) or [config.KNN_N_NEIGHBORS]
+            ks = sorted({int(k) for k in ks if int(k) > 1})
             X_train = X_train.copy()
-            X_train["KNN_TARGET_MEAN"] = [y_train.iloc[i[1:]].mean() for i in tr_idx]
-            # Test: all training neighbors (no leakage)
-            _, te_idx = tree.query(te_knn, k=k)
             X_test = X_test.copy()
-            X_test["KNN_TARGET_MEAN"] = y_train.values[te_idx].mean(axis=1)
-            logger.info(f"KNN target imputation: k={k}, cols={avail}")
+            for k_raw in ks:
+                k = min(k_raw, len(X_train) - 1)
+                if k < 2:
+                    continue
+                # Leave-one-out: query k+1, skip index 0 (self)
+                _, tr_idx = tree.query(tr_knn, k=k + 1)
+                feat_name = f"KNN_TARGET_MEAN_K{k}"
+                X_train[feat_name] = [y_train.iloc[i[1:]].mean() for i in tr_idx]
+                # Test: all training neighbors (no leakage)
+                _, te_idx = tree.query(te_knn, k=k)
+                X_test[feat_name] = y_train.values[te_idx].mean(axis=1)
+            logger.info(
+                "KNN target imputation: "
+                f"k_list={ks}, cols={list(knn_train_df.columns)}"
+            )
 
     # Optuna HPO (only when RUN_OPTUNA=True — gate strictly)
     tuned_params = None

@@ -10,6 +10,48 @@ from pipeline import config
 from pipeline.utils import logger, flush_logger
 
 
+# ── Blend/Stack Helpers ────────────────────────────────────────────────────────
+
+def _rank_normalize_preds(preds: np.ndarray) -> np.ndarray:
+    """Convert predictions to percentile ranks in [0, 1]."""
+    return pd.Series(preds).rank(method="average", pct=True).to_numpy(dtype=np.float32)
+
+
+def _search_simplex_blend_weights(
+    y_true: pd.Series,
+    model_oofs: dict[str, np.ndarray],
+    step: float = 0.05,
+) -> tuple[dict[str, float], float]:
+    """
+    Grid-search blend weights on the simplex for four model OOF vectors.
+    Expected keys (in order): LGBM, DART, CATBOOST, XGB.
+    """
+    order = ["LGBM", "DART", "CATBOOST", "XGB"]
+    arrs = [model_oofs[name] for name in order]
+    units = int(round(1.0 / step))
+    best_auc = -1.0
+    best_w = None
+
+    for a in range(units + 1):
+        for b in range(units - a + 1):
+            for c in range(units - a - b + 1):
+                d = units - a - b - c
+                w = np.array([a, b, c, d], dtype=np.float32) / units
+                blend = w[0] * arrs[0] + w[1] * arrs[1] + w[2] * arrs[2] + w[3] * arrs[3]
+                auc = float(roc_auc_score(y_true, blend))
+                if auc > best_auc:
+                    best_auc = auc
+                    best_w = w
+
+    assert best_w is not None
+    return {
+        "LGBM": float(best_w[0]),
+        "DART": float(best_w[1]),
+        "CATBOOST": float(best_w[2]),
+        "XGB": float(best_w[3]),
+    }, best_auc
+
+
 # ── Adversarial Validation ────────────────────────────────────────────────────
 
 def _adversarial_validation(X_train: pd.DataFrame, X_test: pd.DataFrame) -> float:
@@ -378,8 +420,7 @@ def evaluate_model(
             X_tr_lgb, y_tr,
             eval_set=[(X_val_lgb, y_val)],
             callbacks=[
-                # DART doesn't support early stopping well, but we provide it just in case
-                lgb.early_stopping(config.EARLY_STOPPING_ROUNDS * 2, verbose=False),
+                # LightGBM DART mode does not support early stopping; avoid no-op callback.
                 lgb.log_evaluation(-1),
             ],
         )
@@ -441,39 +482,85 @@ def evaluate_model(
             del X_tr_cb, X_val_cb, cb_m
         gc.collect()
 
-    # ── Level 2 Stacking ──────────────────────────────────────────
+    # ── Level 2 Stacking / Blend Search ───────────────────────────────────────
     logger.info("Training Level 2 Stacker (RidgeRegression)...")
     from sklearn.linear_model import Ridge
     from sklearn.model_selection import cross_val_predict
 
     if catboost_in_ensemble:
         S_train = np.column_stack((oof_lgb, oof_dart, oof_cb, oof_xgb))
+        rank_lgb = _rank_normalize_preds(oof_lgb)
+        rank_dart = _rank_normalize_preds(oof_dart)
+        rank_cb = _rank_normalize_preds(oof_cb)
+        rank_xgb = _rank_normalize_preds(oof_xgb)
+        S_train_rank = np.column_stack((rank_lgb, rank_dart, rank_cb, rank_xgb))
     else:
         S_train = np.column_stack((oof_lgb, oof_dart, oof_xgb))
+        rank_lgb = _rank_normalize_preds(oof_lgb)
+        rank_dart = _rank_normalize_preds(oof_dart)
+        rank_xgb = _rank_normalize_preds(oof_xgb)
+        S_train_rank = np.column_stack((rank_lgb, rank_dart, rank_xgb))
 
     meta_model = Ridge(alpha=1.0)
     # Use cross_val_predict on the OOF predictions to get the final stacked OOF
     stacked_oof = cross_val_predict(meta_model, S_train, y, cv=skf, method='predict')
-    
-    final_auc = float(roc_auc_score(y, stacked_oof))
+    stacked_rank_oof = cross_val_predict(meta_model, S_train_rank, y, cv=skf, method='predict')
+
+    stacked_auc = float(roc_auc_score(y, stacked_oof))
+    stacked_rank_auc = float(roc_auc_score(y, stacked_rank_oof))
     if catboost_in_ensemble:
         static_oof = config.LGBM_WEIGHT * oof_lgb + config.LGBM_DART_WEIGHT * oof_dart + config.CATBOOST_WEIGHT * oof_cb + config.XGB_WEIGHT * oof_xgb
+        static_rank_oof = (
+            config.LGBM_WEIGHT * rank_lgb
+            + config.LGBM_DART_WEIGHT * rank_dart
+            + config.CATBOOST_WEIGHT * rank_cb
+            + config.XGB_WEIGHT * rank_xgb
+        )
+        best_grid_weights, grid_auc = _search_simplex_blend_weights(
+            y,
+            {
+                "LGBM": oof_lgb,
+                "DART": oof_dart,
+                "CATBOOST": oof_cb,
+                "XGB": oof_xgb,
+            },
+            step=0.05,
+        )
     else:
         wsum = config.LGBM_WEIGHT + config.LGBM_DART_WEIGHT + config.XGB_WEIGHT
         wl = config.LGBM_WEIGHT / wsum
         wd = config.LGBM_DART_WEIGHT / wsum
         wx = config.XGB_WEIGHT / wsum
         static_oof = wl * oof_lgb + wd * oof_dart + wx * oof_xgb
+        static_rank_oof = wl * rank_lgb + wd * rank_dart + wx * rank_xgb
+        best_grid_weights = {}
+        grid_auc = -1.0
 
     static_auc = float(roc_auc_score(y, static_oof))
+    static_rank_auc = float(roc_auc_score(y, static_rank_oof))
 
     logger.info(f"OOF Static Weights AUC: {static_auc:.5f}")
-    logger.info(f"OOF Stacked Ridge AUC: {final_auc:.5f}")
-    
-    # We will return the best of either static weights or stacked model
-    if static_auc > final_auc:
-        logger.info("Static weights outperformed Ridge Stacker. Using Static Weights.")
-        final_auc = static_auc
+    logger.info(f"OOF Static Rank-Norm AUC: {static_rank_auc:.5f}")
+    logger.info(f"OOF Stacked Ridge AUC: {stacked_auc:.5f}")
+    logger.info(f"OOF Stacked Ridge Rank-Norm AUC: {stacked_rank_auc:.5f}")
+    if catboost_in_ensemble:
+        logger.info(
+            "OOF Grid-Blend AUC: "
+            f"{grid_auc:.5f} | weights={best_grid_weights}"
+        )
+
+    candidate_aucs = {
+        "static": static_auc,
+        "static_rank": static_rank_auc,
+        "stacked_ridge": stacked_auc,
+        "stacked_ridge_rank": stacked_rank_auc,
+    }
+    if catboost_in_ensemble:
+        candidate_aucs["grid_blend"] = grid_auc
+
+    best_name = max(candidate_aucs, key=candidate_aucs.get)
+    final_auc = candidate_aucs[best_name]
+    logger.info(f"Selected final OOF strategy: {best_name} | AUC: {final_auc:.5f}")
 
     zero_imp_feats = [f for f, cnt in zero_imp_counts.items() if cnt == config.N_FOLDS]
     logger.info(f"Zero-importance features ({len(zero_imp_feats)}): {zero_imp_feats}")
