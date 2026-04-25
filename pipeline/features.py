@@ -24,6 +24,16 @@ def fe_application(df: pl.DataFrame) -> pl.DataFrame:
             .alias("EXT_SRC_MEAN"),
         pl.min_horizontal(["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"])
             .alias("EXT_SRC_MIN"),
+        
+        # EXT_SOURCE interactions with demographics and financials
+        (pl.col("EXT_SOURCE_1") / (pl.col("DAYS_BIRTH") / -365.25 + 1e-8))
+            .alias("EXT1_AGE_RATIO"),
+        (pl.col("EXT_SOURCE_1") / (pl.col("AMT_INCOME_TOTAL") + 1e-8))
+            .alias("EXT1_INCOME_RATIO"),
+        (pl.col("AMT_CREDIT") / (pl.col("EXT_SOURCE_3") + 1e-8))
+            .alias("CREDIT_EXT3_RATIO"),
+        (pl.col("EXT_SOURCE_2") * pl.col("DAYS_EMPLOYED"))
+            .alias("EXT2_EMPLOYED_PROD"),
 
         # Loan term in months — #1 feature in virtually every top solution
         (pl.col("AMT_CREDIT") / (pl.col("AMT_ANNUITY") + 1e-8))

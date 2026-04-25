@@ -322,9 +322,10 @@ def evaluate_model(
     remaining_cat_cols = [c for c in cat_cols if c not in te_cols]
 
     # Store separate OOF predictions for stacking
-    oof_lgb = np.zeros(len(X))
-    oof_xgb = np.zeros(len(X))
-    oof_cb  = np.zeros(len(X))
+    oof_lgb  = np.zeros(len(X))
+    oof_dart = np.zeros(len(X))
+    oof_xgb  = np.zeros(len(X))
+    oof_cb   = np.zeros(len(X))
 
     fold_aucs:  list[float] = []
     zero_imp_counts: dict[str, int] = {}
@@ -334,6 +335,7 @@ def evaluate_model(
         y_tr, y_val = y.iloc[tr_idx], y.iloc[val_idx]
 
         lgbm_p = tuned_params["lgbm"]     if tuned_params else config.LGBM_PARAMS
+        dart_p = config.LGBM_DART_PARAMS
         cb_p   = tuned_params["catboost"] if tuned_params else config.CATBOOST_PARAMS
         xgb_p  = tuned_params["xgboost"]  if tuned_params else config.XGB_PARAMS
 
@@ -370,6 +372,18 @@ def evaluate_model(
             ],
         )
 
+        # ── LightGBM DART ────────────────────────────────────────────────────
+        dart_m = lgb.LGBMClassifier(**dart_p)
+        dart_m.fit(
+            X_tr_lgb, y_tr,
+            eval_set=[(X_val_lgb, y_val)],
+            callbacks=[
+                # DART doesn't support early stopping well, but we provide it just in case
+                lgb.early_stopping(config.EARLY_STOPPING_ROUNDS * 2, verbose=False),
+                lgb.log_evaluation(-1),
+            ],
+        )
+
         cb_m = None
         if catboost_in_ensemble:
             cb_m = cb.CatBoostClassifier(**cb_p, cat_features=cat_cols)
@@ -390,20 +404,28 @@ def evaluate_model(
 
         # ── Store base predictions ────────────────────────────────
         p_lgb = lgb_m.predict_proba(X_val_lgb)[:, 1]
+        p_dart = dart_m.predict_proba(X_val_lgb)[:, 1]
         p_xgb = xgb_m.predict_proba(X_val_xgb)[:, 1]
         oof_lgb[val_idx] = p_lgb
+        oof_dart[val_idx] = p_dart
         oof_xgb[val_idx] = p_xgb
         
         if catboost_in_ensemble:
             p_cb = cb_m.predict_proba(X_val_cb)[:, 1]
             oof_cb[val_idx] = p_cb
             # Temporary static weight for log
-            fold_oof = (config.LGBM_WEIGHT * p_lgb + config.CATBOOST_WEIGHT * p_cb + config.XGB_WEIGHT * p_xgb)
+            fold_oof = (
+                config.LGBM_WEIGHT * p_lgb 
+                + config.LGBM_DART_WEIGHT * p_dart
+                + config.CATBOOST_WEIGHT * p_cb 
+                + config.XGB_WEIGHT * p_xgb
+            )
         else:
-            wsum = config.LGBM_WEIGHT + config.XGB_WEIGHT
+            wsum = config.LGBM_WEIGHT + config.LGBM_DART_WEIGHT + config.XGB_WEIGHT
             wl = config.LGBM_WEIGHT / wsum
+            wd = config.LGBM_DART_WEIGHT / wsum
             wx = config.XGB_WEIGHT / wsum
-            fold_oof = wl * p_lgb + wx * p_xgb
+            fold_oof = wl * p_lgb + wd * p_dart + wx * p_xgb
 
         fold_auc = roc_auc_score(y_val, fold_oof)
         fold_aucs.append(fold_auc)
@@ -414,7 +436,7 @@ def evaluate_model(
             if imp == 0:
                 zero_imp_counts[feat] = zero_imp_counts.get(feat, 0) + 1
 
-        del (X_tr, X_val, X_tr_lgb, X_val_lgb, X_tr_xgb, X_val_xgb, lgb_m, xgb_m)
+        del (X_tr, X_val, X_tr_lgb, X_val_lgb, X_tr_xgb, X_val_xgb, lgb_m, dart_m, xgb_m)
         if catboost_in_ensemble:
             del X_tr_cb, X_val_cb, cb_m
         gc.collect()
@@ -425,16 +447,25 @@ def evaluate_model(
     from sklearn.model_selection import cross_val_predict
 
     if catboost_in_ensemble:
-        S_train = np.column_stack((oof_lgb, oof_cb, oof_xgb))
+        S_train = np.column_stack((oof_lgb, oof_dart, oof_cb, oof_xgb))
     else:
-        S_train = np.column_stack((oof_lgb, oof_xgb))
+        S_train = np.column_stack((oof_lgb, oof_dart, oof_xgb))
 
     meta_model = Ridge(alpha=1.0)
     # Use cross_val_predict on the OOF predictions to get the final stacked OOF
     stacked_oof = cross_val_predict(meta_model, S_train, y, cv=skf, method='predict')
     
     final_auc = float(roc_auc_score(y, stacked_oof))
-    static_auc = float(roc_auc_score(y, config.LGBM_WEIGHT * oof_lgb + config.CATBOOST_WEIGHT * oof_cb + config.XGB_WEIGHT * oof_xgb if catboost_in_ensemble else (oof_lgb + oof_xgb)/2))
+    if catboost_in_ensemble:
+        static_oof = config.LGBM_WEIGHT * oof_lgb + config.LGBM_DART_WEIGHT * oof_dart + config.CATBOOST_WEIGHT * oof_cb + config.XGB_WEIGHT * oof_xgb
+    else:
+        wsum = config.LGBM_WEIGHT + config.LGBM_DART_WEIGHT + config.XGB_WEIGHT
+        wl = config.LGBM_WEIGHT / wsum
+        wd = config.LGBM_DART_WEIGHT / wsum
+        wx = config.XGB_WEIGHT / wsum
+        static_oof = wl * oof_lgb + wd * oof_dart + wx * oof_xgb
+
+    static_auc = float(roc_auc_score(y, static_oof))
 
     logger.info(f"OOF Static Weights AUC: {static_auc:.5f}")
     logger.info(f"OOF Stacked Ridge AUC: {final_auc:.5f}")

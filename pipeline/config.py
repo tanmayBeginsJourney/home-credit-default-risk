@@ -30,9 +30,42 @@ N_FOLDS = 5
 SEED    = 42
 
 # ── Ensemble Weights (must sum to 1.0) ───────────────────────
-LGBM_WEIGHT     = 0.40
-CATBOOST_WEIGHT = 0.35
-XGB_WEIGHT      = 0.25
+LGBM_WEIGHT      = 0.30
+LGBM_DART_WEIGHT = 0.20
+CATBOOST_WEIGHT  = 0.30
+XGB_WEIGHT       = 0.20
+
+# ... jumping to apply_mode_debug / full ...
+def apply_mode_debug() -> None:
+    """
+    15% train sample, 3 folds, smaller trees, Optuna off.
+    Used only by `python -m entrypoints.run_fast` (or `main(full=False)`).
+    """
+    global DEBUG_MODE, N_FOLDS, CAAFE_ITERS, USE_OPENFE, RUN_OPTUNA
+    DEBUG_MODE = True
+    N_FOLDS = 3
+    CAAFE_ITERS = 1
+    USE_OPENFE = False
+    RUN_OPTUNA = False
+    LGBM_PARAMS["n_estimators"] = 300
+    LGBM_DART_PARAMS["n_estimators"] = 300
+    CATBOOST_PARAMS["iterations"] = 300
+    XGB_PARAMS["n_estimators"] = 300
+
+
+def apply_mode_full() -> None:
+    """
+    100% rows, 5 folds, full tree budgets. Does not change RUN_OPTUNA (edit in this file to run HPO).
+    Used only by `python -m entrypoints.run_full` (or `main(full=True)`).
+    """
+    global DEBUG_MODE, N_FOLDS, CAAFE_ITERS
+    DEBUG_MODE = False
+    N_FOLDS = 5
+    CAAFE_ITERS = 3
+    LGBM_PARAMS["n_estimators"] = 1000
+    LGBM_DART_PARAMS["n_estimators"] = 1000
+    CATBOOST_PARAMS["iterations"] = 1000
+    XGB_PARAMS["n_estimators"] = 1000
 
 # ── Model Defaults (used when RUN_OPTUNA=False) ──────────────
 # LGBM row tuned: Optuna study inner AUC 0.77676 (experiment.log 2026-04-24, subsample CV).
@@ -49,6 +82,25 @@ LGBM_PARAMS = {
     "random_state": SEED,
     "device": "gpu",
     "verbose": -1,
+}
+
+LGBM_DART_PARAMS = {
+    "boosting_type": "dart",
+    "n_estimators": 1000,
+    "learning_rate": 0.031823148246266635,
+    "num_leaves": 31,
+    "max_depth": -1,
+    "min_child_samples": 88,
+    "subsample": 0.6531367953827713,
+    "colsample_bytree": 0.44449518484544653,
+    "reg_alpha": 8.394296984616961,
+    "reg_lambda": 0.005560393707943842,
+    "random_state": SEED,
+    "device": "gpu",
+    "verbose": -1,
+    "drop_rate": 0.1,
+    "max_drop": 50,
+    "skip_drop": 0.5,
 }
 CATBOOST_PARAMS = {
     "iterations": 1000,
@@ -136,15 +188,15 @@ def apply_mode_debug() -> None:
     Used only by `python -m entrypoints.run_fast` (or `main(full=False)`).
     """
     global DEBUG_MODE, N_FOLDS, CAAFE_ITERS, USE_OPENFE, RUN_OPTUNA
-    DEBUG_MODE = True
+    DEBUG_MODE = False
     N_FOLDS = 3
     CAAFE_ITERS = 1
     USE_OPENFE = False
     RUN_OPTUNA = False
     LGBM_PARAMS["n_estimators"] = 300
+    LGBM_DART_PARAMS["n_estimators"] = 300
     CATBOOST_PARAMS["iterations"] = 300
     XGB_PARAMS["n_estimators"] = 300
-
 
 def apply_mode_full() -> None:
     """
@@ -156,5 +208,6 @@ def apply_mode_full() -> None:
     N_FOLDS = 5
     CAAFE_ITERS = 3
     LGBM_PARAMS["n_estimators"] = 1000
+    LGBM_DART_PARAMS["n_estimators"] = 1000
     CATBOOST_PARAMS["iterations"] = 1000
     XGB_PARAMS["n_estimators"] = 1000
