@@ -85,11 +85,23 @@ if __name__ == "__main__":
     ensure_parquet_format(config.DATA_DIR)
     
     # Bureau
-    bureau_meta = generate_meta_features("bureau", "SK_ID_BUREAU", [])
-    bureau_meta.to_parquet(config.CACHE_DIR / "meta_bureau.parquet")
+    if not (config.CACHE_DIR / "meta_bureau.parquet").exists():
+        bureau_meta = generate_meta_features("bureau", "SK_ID_BUREAU", [])
+        bureau_meta.to_parquet(config.CACHE_DIR / "meta_bureau.parquet")
     
     # Previous Application
-    prev_meta = generate_meta_features("previous_application", "SK_ID_PREV", [])
-    prev_meta.to_parquet(config.CACHE_DIR / "meta_prev.parquet")
+    if not (config.CACHE_DIR / "meta_prev.parquet").exists():
+        prev_meta = generate_meta_features("previous_application", "SK_ID_PREV", [])
+        prev_meta.to_parquet(config.CACHE_DIR / "meta_prev.parquet")
+        
+    # Installments Payments
+    if not (config.CACHE_DIR / "meta_installments.parquet").exists():
+        inst_meta = generate_meta_features("installments_payments", "SK_ID_PREV", [])
+        inst_meta.to_parquet(config.CACHE_DIR / "meta_installments.parquet")
+        
+    # POS CASH Balance
+    if not (config.CACHE_DIR / "meta_pos_cash.parquet").exists():
+        pos_meta = generate_meta_features("POS_CASH_balance", "SK_ID_PREV", [])
+        pos_meta.to_parquet(config.CACHE_DIR / "meta_pos_cash.parquet")
     
     logger.info("Meta-features successfully generated and cached.")

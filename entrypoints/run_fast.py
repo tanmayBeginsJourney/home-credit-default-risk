@@ -76,14 +76,47 @@ def main(full: bool = False) -> float:
         test  = test.join(meta_bureau,  on="SK_ID_CURR", how="left")
         logger.info(f"Merged meta_bureau: train={train.shape}, test={test.shape}")
         del meta_bureau
-        
+
     if (config.CACHE_DIR / "meta_prev.parquet").exists():
         meta_prev = pl.read_parquet(config.CACHE_DIR / "meta_prev.parquet")
         train = train.join(meta_prev, on="SK_ID_CURR", how="left")
         test  = test.join(meta_prev,  on="SK_ID_CURR", how="left")
         logger.info(f"Merged meta_prev: train={train.shape}, test={test.shape}")
         del meta_prev
-        gc.collect()
+
+    if (config.CACHE_DIR / "meta_installments.parquet").exists():
+        meta_inst = pl.read_parquet(config.CACHE_DIR / "meta_installments.parquet")
+        train = train.join(meta_inst, on="SK_ID_CURR", how="left")
+        test  = test.join(meta_inst,  on="SK_ID_CURR", how="left")
+        logger.info(f"Merged meta_installments: train={train.shape}, test={test.shape}")
+        del meta_inst
+        
+    if (config.CACHE_DIR / "meta_pos_cash.parquet").exists():
+        meta_pos = pl.read_parquet(config.CACHE_DIR / "meta_pos_cash.parquet")
+        train = train.join(meta_pos, on="SK_ID_CURR", how="left")
+        test  = test.join(meta_pos,  on="SK_ID_CURR", how="left")
+        logger.info(f"Merged meta_pos_cash: train={train.shape}, test={test.shape}")
+        del meta_pos
+
+    if (config.CACHE_DIR / "meta_ext_train.parquet").exists():
+        meta_ext_train = pl.read_parquet(config.CACHE_DIR / "meta_ext_train.parquet")
+        meta_ext_test = pl.read_parquet(config.CACHE_DIR / "meta_ext_test.parquet")
+        train = train.join(meta_ext_train, on="SK_ID_CURR", how="left")
+        test  = test.join(meta_ext_test,  on="SK_ID_CURR", how="left")
+        
+        # Interaction residuals
+        for c in ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]:
+            if c in train.columns and f"PRED_{c}" in train.columns:
+                train = train.with_columns(
+                    (pl.col(c) - pl.col(f"PRED_{c}")).alias(f"{c}_RESIDUAL")
+                )
+                test = test.with_columns(
+                    (pl.col(c) - pl.col(f"PRED_{c}")).alias(f"{c}_RESIDUAL")
+                )
+        logger.info(f"Merged meta_ext_sources: train={train.shape}, test={test.shape}")
+        del meta_ext_train, meta_ext_test
+        
+    gc.collect()
 
     # Feature engineering
     train = fe_application(train)

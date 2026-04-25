@@ -16,7 +16,7 @@ LOG_FILE = Path("./experiment.log")
 #   run_fast → 15% sample, 3 folds, no Optuna
 #   run_full → 100% data, 5-fold OOF (set RUN_OPTUNA True here for HPO on full data)
 DEBUG_MODE = False
-RUN_OPTUNA = True
+RUN_OPTUNA = False
 DEBUG_SAMPLE_FRAC = 0.15
 
 # ── Pipeline Toggles ─────────────────────────────────────────
