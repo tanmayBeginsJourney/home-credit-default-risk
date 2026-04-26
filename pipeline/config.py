@@ -152,6 +152,8 @@ COLS_TO_DROP: list[str] = [
     "BUREAU_BB_STATUS_3_COUNT_SUM", "BUREAU_BB_STATUS_4_COUNT_SUM", "BUREAU_BB_STATUS_5_COUNT_SUM",
     # Zero importance in accepted run_id=bcf3118873d54371acb775a8d0d5e188
     "BUREAU_PROLONG_SUM", "BUREAU_BB_SEVERE_STATUS_SUM",
+    # Zero importance in run_id=c599f7fbd26746bbab8eca3355bdcb9a
+    "FLAG_DOCUMENT_6",
 ]
 
 # ── KNN Target Imputation (Tier 6) ───────────────────────

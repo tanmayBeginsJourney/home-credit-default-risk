@@ -332,7 +332,7 @@ def evaluate_model(
     tuned_params: dict | None = None,
     *,
     catboost_in_ensemble: bool = True,
-) -> tuple[float, list[str]]:
+) -> tuple[float, list[str], np.ndarray]:
     """
     Surgical TE: TE columns for LGBM + XGB only; CatBoost uses raw categoricals when
     catboost_in_ensemble=True (production). Set catboost_in_ensemble=False only for ablations.
@@ -375,6 +375,10 @@ def evaluate_model(
     oof_dart = np.zeros(len(X))
     oof_xgb  = np.zeros(len(X))
     oof_cb   = np.zeros(len(X))
+    test_lgb = np.zeros(len(X_test))
+    test_dart = np.zeros(len(X_test))
+    test_xgb = np.zeros(len(X_test))
+    test_cb = np.zeros(len(X_test))
 
     fold_aucs:  list[float] = []
     zero_imp_counts: dict[str, int] = {}
@@ -397,18 +401,22 @@ def evaluate_model(
 
         X_tr_xgb  = X_tr_lgb.copy()
         X_val_xgb = X_val_lgb.copy()
+        X_test_xgb = X_test_lgb_xgb.copy()
         for c in remaining_cat_cols:
             codes, uniques = pd.factorize(X_tr_xgb[c])
             X_tr_xgb[c] = codes
             X_val_xgb[c] = pd.Categorical(X_val_xgb[c], categories=uniques).codes
+            X_test_xgb[c] = pd.Categorical(X_test_xgb[c], categories=uniques).codes
 
         X_tr_cb = X_val_cb = None
         if catboost_in_ensemble:
             X_tr_cb = X_tr.copy()
             X_val_cb = X_val.copy()
+            X_test_cb = X_test.copy()
             for c in cat_cols:
                 X_tr_cb[c] = X_tr_cb[c].astype(object).fillna("MISSING")
                 X_val_cb[c] = X_val_cb[c].astype(object).fillna("MISSING")
+                X_test_cb[c] = X_test_cb[c].astype(object).fillna("MISSING")
 
         # ── LightGBM ─────────────────────────────────────────────────────────
         lgb_models: list[lgb.LGBMClassifier] = []
@@ -461,16 +469,29 @@ def evaluate_model(
 
         # ── Store base predictions ────────────────────────────────
         p_lgb = p_lgb_acc / len(lgb_models)
+        p_lgb_test = np.zeros(len(X_test_lgb_xgb), dtype=np.float32)
+        for lgb_m in lgb_models:
+            p_lgb_test += lgb_m.predict_proba(X_test_lgb_xgb)[:, 1].astype(np.float32)
+        p_lgb_test /= len(lgb_models)
         if use_dart:
             p_dart = dart_m.predict_proba(X_val_lgb)[:, 1]
+            p_dart_test = dart_m.predict_proba(X_test_lgb_xgb)[:, 1]
+        else:
+            p_dart_test = np.zeros(len(X_test_lgb_xgb), dtype=np.float32)
         p_xgb = xgb_m.predict_proba(X_val_xgb)[:, 1]
+        p_xgb_test = xgb_m.predict_proba(X_test_xgb)[:, 1]
         oof_lgb[val_idx] = p_lgb
         oof_dart[val_idx] = p_dart
         oof_xgb[val_idx] = p_xgb
+        test_lgb += p_lgb_test / config.N_FOLDS
+        test_dart += p_dart_test / config.N_FOLDS
+        test_xgb += p_xgb_test / config.N_FOLDS
         
         if catboost_in_ensemble:
             p_cb = cb_m.predict_proba(X_val_cb)[:, 1]
+            p_cb_test = cb_m.predict_proba(X_test_cb)[:, 1]
             oof_cb[val_idx] = p_cb
+            test_cb += p_cb_test / config.N_FOLDS
             # Temporary static weight for log
             fold_oof = (
                 config.LGBM_WEIGHT * p_lgb 
@@ -495,12 +516,12 @@ def evaluate_model(
             if imp == 0:
                 zero_imp_counts[feat] = zero_imp_counts.get(feat, 0) + 1
 
-        del X_tr, X_val, X_tr_lgb, X_val_lgb, X_tr_xgb, X_val_xgb, p_lgb_acc, xgb_m, primary_lgb
+        del X_tr, X_val, X_tr_lgb, X_val_lgb, X_tr_xgb, X_val_xgb, X_test_xgb, p_lgb_acc, xgb_m, primary_lgb
         del lgb_models
         if dart_m is not None:
             del dart_m
         if catboost_in_ensemble:
-            del X_tr_cb, X_val_cb, cb_m
+            del X_tr_cb, X_val_cb, X_test_cb, cb_m
         gc.collect()
 
     # ── Level 2 Stacking / Blend Search ───────────────────────────────────────
@@ -511,37 +532,62 @@ def evaluate_model(
     if catboost_in_ensemble:
         if use_dart:
             S_train = np.column_stack((oof_lgb, oof_dart, oof_cb, oof_xgb))
+            S_test = np.column_stack((test_lgb, test_dart, test_cb, test_xgb))
         else:
             S_train = np.column_stack((oof_lgb, oof_cb, oof_xgb))
+            S_test = np.column_stack((test_lgb, test_cb, test_xgb))
         rank_lgb = _rank_normalize_preds(oof_lgb)
         rank_cb = _rank_normalize_preds(oof_cb)
         rank_xgb = _rank_normalize_preds(oof_xgb)
         rank_dart = _rank_normalize_preds(oof_dart)
+        test_rank_lgb = _rank_normalize_preds(test_lgb)
+        test_rank_cb = _rank_normalize_preds(test_cb)
+        test_rank_xgb = _rank_normalize_preds(test_xgb)
+        test_rank_dart = _rank_normalize_preds(test_dart)
         if use_dart:
             S_train_rank = np.column_stack((rank_lgb, rank_dart, rank_cb, rank_xgb))
+            S_test_rank = np.column_stack((test_rank_lgb, test_rank_dart, test_rank_cb, test_rank_xgb))
         else:
             S_train_rank = np.column_stack((rank_lgb, rank_cb, rank_xgb))
+            S_test_rank = np.column_stack((test_rank_lgb, test_rank_cb, test_rank_xgb))
     else:
         S_train = np.column_stack((oof_lgb, oof_dart, oof_xgb))
+        S_test = np.column_stack((test_lgb, test_dart, test_xgb))
         rank_lgb = _rank_normalize_preds(oof_lgb)
         rank_dart = _rank_normalize_preds(oof_dart)
         rank_xgb = _rank_normalize_preds(oof_xgb)
+        test_rank_lgb = _rank_normalize_preds(test_lgb)
+        test_rank_dart = _rank_normalize_preds(test_dart)
+        test_rank_xgb = _rank_normalize_preds(test_xgb)
         S_train_rank = np.column_stack((rank_lgb, rank_dart, rank_xgb))
+        S_test_rank = np.column_stack((test_rank_lgb, test_rank_dart, test_rank_xgb))
 
     meta_model = Ridge(alpha=1.0)
     # Use cross_val_predict on the OOF predictions to get the final stacked OOF
     stacked_oof = cross_val_predict(meta_model, S_train, y, cv=skf, method='predict')
     stacked_rank_oof = cross_val_predict(meta_model, S_train_rank, y, cv=skf, method='predict')
+    # Fit full-data stackers for test prediction
+    meta_model.fit(S_train, y)
+    stacked_test = meta_model.predict(S_test)
+    meta_model.fit(S_train_rank, y)
+    stacked_rank_test = meta_model.predict(S_test_rank)
 
     stacked_auc = float(roc_auc_score(y, stacked_oof))
     stacked_rank_auc = float(roc_auc_score(y, stacked_rank_oof))
     if catboost_in_ensemble:
         static_oof = config.LGBM_WEIGHT * oof_lgb + config.LGBM_DART_WEIGHT * oof_dart + config.CATBOOST_WEIGHT * oof_cb + config.XGB_WEIGHT * oof_xgb
+        static_test = config.LGBM_WEIGHT * test_lgb + config.LGBM_DART_WEIGHT * test_dart + config.CATBOOST_WEIGHT * test_cb + config.XGB_WEIGHT * test_xgb
         static_rank_oof = (
             config.LGBM_WEIGHT * rank_lgb
             + config.LGBM_DART_WEIGHT * rank_dart
             + config.CATBOOST_WEIGHT * rank_cb
             + config.XGB_WEIGHT * rank_xgb
+        )
+        static_rank_test = (
+            config.LGBM_WEIGHT * test_rank_lgb
+            + config.LGBM_DART_WEIGHT * test_rank_dart
+            + config.CATBOOST_WEIGHT * test_rank_cb
+            + config.XGB_WEIGHT * test_rank_xgb
         )
         best_grid_weights, grid_auc = _search_simplex_blend_weights(
             y,
@@ -559,7 +605,9 @@ def evaluate_model(
         wd = config.LGBM_DART_WEIGHT / wsum
         wx = config.XGB_WEIGHT / wsum
         static_oof = wl * oof_lgb + wd * oof_dart + wx * oof_xgb
+        static_test = wl * test_lgb + wd * test_dart + wx * test_xgb
         static_rank_oof = wl * rank_lgb + wd * rank_dart + wx * rank_xgb
+        static_rank_test = wl * test_rank_lgb + wd * test_rank_dart + wx * test_rank_xgb
         best_grid_weights = {}
         grid_auc = -1.0
 
@@ -587,10 +635,25 @@ def evaluate_model(
 
     best_name = max(candidate_aucs, key=candidate_aucs.get)
     final_auc = candidate_aucs[best_name]
+    if best_name == "grid_blend" and catboost_in_ensemble:
+        final_test_preds = (
+            best_grid_weights["LGBM"] * test_lgb
+            + best_grid_weights["DART"] * test_dart
+            + best_grid_weights["CATBOOST"] * test_cb
+            + best_grid_weights["XGB"] * test_xgb
+        )
+    elif best_name == "stacked_ridge":
+        final_test_preds = stacked_test
+    elif best_name == "stacked_ridge_rank":
+        final_test_preds = stacked_rank_test
+    elif best_name == "static_rank":
+        final_test_preds = static_rank_test
+    else:
+        final_test_preds = static_test
     logger.info(f"Selected final OOF strategy: {best_name} | AUC: {final_auc:.5f}")
 
     zero_imp_feats = [f for f, cnt in zero_imp_counts.items() if cnt == config.N_FOLDS]
     logger.info(f"Zero-importance features ({len(zero_imp_feats)}): {zero_imp_feats}")
     flush_logger()
 
-    return final_auc, zero_imp_feats
+    return final_auc, zero_imp_feats, final_test_preds

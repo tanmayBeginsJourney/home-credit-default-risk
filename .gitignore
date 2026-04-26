@@ -1,5 +1,5 @@
 data
-cache
+
 
 # Python bytecode / caches
 __pycache__/
@@ -8,7 +8,7 @@ __pycache__/
 *.pyd
 
 # Experiment/runtime artifacts
-*.log
+
 catboost_info/
 .ipynb_checkpoints/
 
@@ -26,3 +26,4 @@ Thumbs.db
 !spec.md
 
 AGENT_HANDOFF.md    
+

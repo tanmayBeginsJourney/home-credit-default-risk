@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from pipeline import config
 from pipeline.utils import seed_everything, ensure_parquet_format, logger, flush_logger
@@ -71,36 +72,66 @@ def main(full: bool = False) -> float:
     # Meta-features
     import polars as pl
     if (config.CACHE_DIR / "meta_bureau.parquet").exists():
-        meta_bureau = pl.read_parquet(config.CACHE_DIR / "meta_bureau.parquet")
+        meta_bureau = pl.read_parquet(config.CACHE_DIR / "meta_bureau.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
         train = train.join(meta_bureau, on="SK_ID_CURR", how="left")
         test  = test.join(meta_bureau,  on="SK_ID_CURR", how="left")
         logger.info(f"Merged meta_bureau: train={train.shape}, test={test.shape}")
         del meta_bureau
 
     if (config.CACHE_DIR / "meta_prev.parquet").exists():
-        meta_prev = pl.read_parquet(config.CACHE_DIR / "meta_prev.parquet")
+        meta_prev = pl.read_parquet(config.CACHE_DIR / "meta_prev.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
         train = train.join(meta_prev, on="SK_ID_CURR", how="left")
         test  = test.join(meta_prev,  on="SK_ID_CURR", how="left")
         logger.info(f"Merged meta_prev: train={train.shape}, test={test.shape}")
         del meta_prev
 
     if (config.CACHE_DIR / "meta_installments.parquet").exists():
-        meta_inst = pl.read_parquet(config.CACHE_DIR / "meta_installments.parquet")
+        meta_inst = pl.read_parquet(config.CACHE_DIR / "meta_installments.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
         train = train.join(meta_inst, on="SK_ID_CURR", how="left")
         test  = test.join(meta_inst,  on="SK_ID_CURR", how="left")
         logger.info(f"Merged meta_installments: train={train.shape}, test={test.shape}")
         del meta_inst
         
     if (config.CACHE_DIR / "meta_pos_cash.parquet").exists():
-        meta_pos = pl.read_parquet(config.CACHE_DIR / "meta_pos_cash.parquet")
+        meta_pos = pl.read_parquet(config.CACHE_DIR / "meta_pos_cash.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
         train = train.join(meta_pos, on="SK_ID_CURR", how="left")
         test  = test.join(meta_pos,  on="SK_ID_CURR", how="left")
         logger.info(f"Merged meta_pos_cash: train={train.shape}, test={test.shape}")
         del meta_pos
+    
+    if (config.CACHE_DIR / "meta_credit_card.parquet").exists():
+        meta_cc = pl.read_parquet(config.CACHE_DIR / "meta_credit_card.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
+        train = train.join(meta_cc, on="SK_ID_CURR", how="left")
+        test  = test.join(meta_cc,  on="SK_ID_CURR", how="left")
+        logger.info(f"Merged meta_credit_card: train={train.shape}, test={test.shape}")
+        del meta_cc
+
+    if (config.CACHE_DIR / "meta_bureau_balance.parquet").exists():
+        meta_bb = pl.read_parquet(config.CACHE_DIR / "meta_bureau_balance.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
+        train = train.join(meta_bb, on="SK_ID_CURR", how="left")
+        test  = test.join(meta_bb,  on="SK_ID_CURR", how="left")
+        logger.info(f"Merged meta_bureau_balance: train={train.shape}, test={test.shape}")
+        del meta_bb
 
     if (config.CACHE_DIR / "meta_ext_train.parquet").exists():
-        meta_ext_train = pl.read_parquet(config.CACHE_DIR / "meta_ext_train.parquet")
-        meta_ext_test = pl.read_parquet(config.CACHE_DIR / "meta_ext_test.parquet")
+        meta_ext_train = pl.read_parquet(config.CACHE_DIR / "meta_ext_train.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
+        meta_ext_test = pl.read_parquet(config.CACHE_DIR / "meta_ext_test.parquet").with_columns(
+            pl.col("SK_ID_CURR").cast(pl.Int32)
+        )
         train = train.join(meta_ext_train, on="SK_ID_CURR", how="left")
         test  = test.join(meta_ext_test,  on="SK_ID_CURR", how="left")
         
@@ -137,6 +168,7 @@ def main(full: bool = False) -> float:
     test_pd  = test.to_pandas()
     del train, test
     gc.collect()
+    submission_ids = test_pd["SK_ID_CURR"].copy()
 
     # Polars Categorical → pandas StringDtype on conversion; re-cast to category
     str_cols = [c for c in train_pd.columns if str(train_pd[c].dtype) in ("string", "object")]
@@ -206,7 +238,19 @@ def main(full: bool = False) -> float:
 
     # Evaluate
     logger.info("Starting model evaluation...")
-    auc, zero_feats = evaluate_model(X_train, y_train, X_test, tuned_params=tuned_params)
+    auc, zero_feats, test_preds = evaluate_model(X_train, y_train, X_test, tuned_params=tuned_params)
+
+    submissions_dir = Path("submissions")
+    submissions_dir.mkdir(parents=True, exist_ok=True)
+    submission_file = submissions_dir / f"submission_{run_id}_{'full' if full else 'debug'}.csv"
+    submission_df = pd.DataFrame(
+        {
+            "SK_ID_CURR": submission_ids.to_numpy(),
+            "TARGET": np.asarray(test_preds, dtype=np.float32),
+        }
+    )
+    submission_df.to_csv(submission_file, index=False)
+    logger.info(f"Saved submission file: {submission_file}")
 
     if zero_feats:
         logger.info(f"ACTION REQUIRED: Drop {len(zero_feats)} zero-importance features.")
